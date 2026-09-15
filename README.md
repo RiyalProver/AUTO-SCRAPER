@@ -9,6 +9,11 @@ the last ten phone digits, writes
 new contacts to the Callmark path `users/{FIREBASE_USER_ID}/contacts`, and then
 advances the city index (wrapping after the 50th city).
 
+Proxy isolation is deliberate: only the gosom Docker command receives the
+rotating proxy through `-proxies-file`. Website audits use a direct
+`requests.Session.get()` call with environment proxy discovery disabled and no
+session proxies configured.
+
 The fork source and Dockerfile are under `gosom-google-maps-scraper/`. The
 workflow builds `callmark/gosom-google-maps-scraper:text-only` on the runner;
 it does not pull the stock gosom scraper image.

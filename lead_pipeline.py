@@ -286,12 +286,18 @@ def _host_is_free_or_social(url: str) -> bool:
 
 
 def audit_website(url: Any, session: requests.Session | None = None, timeout: float = 20.0) -> dict[str, Any]:
-    """Audit raw homepage HTML with requests only; no headless browser is used."""
+    """Audit raw homepage HTML directly, without any proxy or browser."""
     raw = str(url or "").strip()
     if not raw:
         return {"website": "", "website_final_url": "", "website_status": "NO_WEBSITE", "website_opportunity": NO_WEBSITE}
     target = raw if re.match(r"^https?://", raw, re.I) else f"https://{raw}"
     client = session or requests.Session()
+    # Website audits are intentionally direct connections. Disable Requests'
+    # ambient HTTP(S)_PROXY lookup and any proxy configured on a reused session;
+    # the rotating proxy is reserved for the gosom Docker scraper below.
+    client.trust_env = False
+    if hasattr(client, "proxies"):
+        client.proxies = {}
     try:
         response = client.get(
             target,

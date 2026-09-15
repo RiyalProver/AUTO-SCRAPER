@@ -87,8 +87,23 @@ class LeadPipelineTests(unittest.TestCase):
         session = Mock(); session.get.return_value = response
         result = audit_website("https://example.com", session=session)
         session.get.assert_called_once()
+        self.assertFalse(session.trust_env)
+        self.assertEqual(session.proxies, {})
         self.assertEqual(result["website_status"], 200)
         self.assertEqual(result["website_opportunity"], OPPORTUNITY_SOLID)
+
+    def test_audit_clears_proxy_on_reused_requests_session(self):
+        import requests
+
+        session = requests.Session()
+        session.trust_env = True
+        session.proxies.update({"http": "http://proxy.invalid:8080", "https": "http://proxy.invalid:8080"})
+        response = Mock(status_code=200, url="https://example.com", text='<meta name="description" content="ok">')
+        with patch.object(session, "get", return_value=response) as get_mock:
+            audit_website("https://example.com", session=session)
+        self.assertFalse(session.trust_env)
+        self.assertEqual(session.proxies, {})
+        self.assertNotIn("proxies", get_mock.call_args.kwargs)
 
     def test_qualified_lead_and_run_dedupe(self):
         market = Market("Fort Wayne", "IN")
