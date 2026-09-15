@@ -1,0 +1,47 @@
+name: Scheduled lead scrape
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: callmark-lead-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+      FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
+      FIREBASE_USER_ID: ${{ secrets.FIREBASE_USER_ID }}
+      PROXY_URL: ${{ secrets.PROXY_URL }}
+      PROXY_HOST: ${{ secrets.PROXY_HOST }}
+      PROXY_PORT: ${{ secrets.PROXY_PORT }}
+      PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+      PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+      PROXY_SCHEME: ${{ secrets.PROXY_SCHEME }}
+      GOOGLE_MAPS_SCRAPER_IMAGE: callmark/gosom-google-maps-scraper:text-only
+      SCRAPER_TIMEOUT_SECONDS: "7200"
+      SCRAPER_DEPTH: "5"
+      SCRAPER_GRID_CELL_KM: "2"
+      SCRAPER_CONCURRENCY: "2"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build optimized gosom scraper image
+        run: docker build --tag "$GOOGLE_MAPS_SCRAPER_IMAGE" ./gosom-google-maps-scraper
+      - name: Install pipeline dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Scrape one market and write new Callmark contacts
+        run: python lead_pipeline.py

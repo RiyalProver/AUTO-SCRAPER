@@ -1,0 +1,10 @@
+.git
+.github
+docs
+examples
+local
+testdata
+third_party/scrapemate/docs
+third_party/scrapemate/examples
+third_party/scrapemate/tests
+third_party/scrapemate/.github
