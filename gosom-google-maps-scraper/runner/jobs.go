@@ -23,6 +23,7 @@ type seedJobConfig struct {
 	completedInputSkipper func(string) bool
 	completionTracker     gmaps.CompletionTracker
 	deterministicIDs      bool
+	maxResultsPerQuery    int
 }
 
 // SeedJobOption configures seed job creation.
@@ -46,6 +47,13 @@ func WithCompletionTracker(tracker gmaps.CompletionTracker) SeedJobOption {
 func WithDeterministicSeedIDs() SeedJobOption {
 	return func(cfg *seedJobConfig) {
 		cfg.deterministicIDs = true
+	}
+}
+
+// WithMaxResultsPerQuery limits the place jobs created by each search seed.
+func WithMaxResultsPerQuery(limit int) SeedJobOption {
+	return func(cfg *seedJobConfig) {
+		cfg.maxResultsPerQuery = limit
 	}
 }
 
@@ -146,6 +154,10 @@ func CreateSeedJobs(
 
 			if createCfg.completionTracker != nil {
 				opts = append(opts, gmaps.WithGmapCompletionTracker(createCfg.completionTracker))
+			}
+
+			if createCfg.maxResultsPerQuery > 0 {
+				opts = append(opts, gmaps.WithMaxResults(createCfg.maxResultsPerQuery))
 			}
 
 			job = gmaps.NewGmapJob(id, langCode, query, maxDepth, email, geoCoordinates, zoom, opts...)
@@ -262,6 +274,10 @@ func CreateGridSeedJobs(
 
 			if createCfg.completionTracker != nil {
 				opts = append(opts, gmaps.WithGmapCompletionTracker(createCfg.completionTracker))
+			}
+
+			if createCfg.maxResultsPerQuery > 0 {
+				opts = append(opts, gmaps.WithMaxResults(createCfg.maxResultsPerQuery))
 			}
 
 			job := gmaps.NewGmapJob(

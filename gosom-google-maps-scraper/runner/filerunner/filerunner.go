@@ -191,15 +191,21 @@ func (r *fileRunner) Close(context.Context) error {
 }
 
 func (r *fileRunner) seedJobOptions() []runner.SeedJobOption {
-	if !r.cfg.Resume {
-		return nil
+	var opts []runner.SeedJobOption
+
+	if r.cfg.MaxResultsPerQuery > 0 {
+		opts = append(opts, runner.WithMaxResultsPerQuery(r.cfg.MaxResultsPerQuery))
 	}
 
-	return []runner.SeedJobOption{
-		runner.WithDeterministicSeedIDs(),
-		runner.WithCompletedInputSkipper(r.resumeState.IsInputCompleted),
-		runner.WithCompletionTracker(r.resumeProgress),
+	if r.cfg.Resume {
+		opts = append(opts,
+			runner.WithDeterministicSeedIDs(),
+			runner.WithCompletedInputSkipper(r.resumeState.IsInputCompleted),
+			runner.WithCompletionTracker(r.resumeProgress),
+		)
 	}
+
+	return opts
 }
 
 func (r *fileRunner) setInput() error {

@@ -2,8 +2,8 @@ module github.com/gosom/google-maps-scraper
 
 go 1.27.1
 
-// This repository carries the text-only browser optimization in a local fork
-// of scrapemate so the Docker build is self-contained and reproducible.
+// This repository carries the cache-preserving browser optimization in a local
+// fork of scrapemate so the Docker build is self-contained and reproducible.
 replace github.com/gosom/scrapemate => ./third_party/scrapemate
 
 require (

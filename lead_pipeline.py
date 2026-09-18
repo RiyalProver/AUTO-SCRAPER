@@ -1,12 +1,13 @@
 """Scheduled Google Maps lead scraping pipeline for the Callmark app.
 
 The script intentionally performs one market per invocation. GitHub Actions runs it
-on a schedule, while the Firestore progress document selects the next market.
+on a schedule, while a repository JSON file selects the next market. Qualified leads
+are written to a Callmark-compatible CSV artifact for later import.
 """
 
 from __future__ import annotations
 
-import base64
+import argparse
 import csv
 import io
 import json
@@ -196,13 +197,24 @@ AUDIT_FAILED = "Homepage unavailable or blocked during audit"
 FREE_DOMAIN = "Free page builder domain"
 MISSING_META = "Missing meta description"
 
-# Mirrors MARKING APP/src/firebase.js cleanContact plus the `id` field added by
-# writeContactsBatch and consumed for selection/avatar rendering.
+# Mirrors the Callmark contact display/import fields, including the numeric `id`
+# used for selection and avatar rendering.
 CALLMARK_CONTACT_FIELDS: tuple[str, ...] = (
     "id", "name", "contactName", "company", "role", "phone", "email", "city",
     "status", "due", "dueDate", "lastCall", "lastOutcome", "notes", "tag",
     "source",
 )
+
+# CSV columns accepted by Callmark's contact import, followed by the scraper
+# metadata that helps prioritize website-improvement prospects.
+CALLMARK_CSV_FIELDS: tuple[str, ...] = CALLMARK_CONTACT_FIELDS + (
+    "website_status", "website_opportunity", "address", "rating", "verified_date",
+)
+
+PROGRESS_FILE = Path(__file__).with_name("scrape_progress.json")
+DEFAULT_OUTPUT_DIR = Path(__file__).with_name("output")
+DEFAULT_TEST_RESULTS_PER_NICHE = 10
+TEST_INPUT_ID_PREFIX = "test-niche-"
 
 
 @dataclass(frozen=True)
@@ -374,16 +386,15 @@ def load_scraper_results(path: Path) -> list[dict[str, Any]]:
 
 def proxy_uri_from_env(env: Mapping[str, str] | None = None) -> str:
     values = env or os.environ
-    direct = str(values.get("PROXY_URL", "")).strip()
-    if direct:
-        return direct
     host = str(values.get("PROXY_HOST", "")).strip()
     port = str(values.get("PROXY_PORT", "")).strip()
     username = str(values.get("PROXY_USERNAME", "")).strip()
     password = str(values.get("PROXY_PASSWORD", "")).strip()
-    if not all((host, port, username, password)):
-        raise RuntimeError("Set PROXY_URL or PROXY_HOST, PROXY_PORT, PROXY_USERNAME, and PROXY_PASSWORD")
-    scheme = str(values.get("PROXY_SCHEME", "http")).strip() or "http"
+    scheme = str(values.get("PROXY_SCHEME", "")).strip()
+    if not all((host, port, username, password, scheme)):
+        raise RuntimeError(
+            "Set PROXY_HOST, PROXY_PORT, PROXY_USERNAME, PROXY_PASSWORD, and PROXY_SCHEME"
+        )
     return f"{scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{host}:{port}"
 
 
@@ -394,9 +405,31 @@ def _safe_error(output: str, proxy_uri: str) -> str:
     return redacted[-2000:]
 
 
-def run_gosom_scraper(market: Market, proxy_uri: str, image: str | None = None) -> list[dict[str, Any]]:
+def _limit_test_rows(rows: Sequence[Mapping[str, Any]], per_niche: int) -> list[dict[str, Any]]:
+    """Keep at most ``per_niche`` raw scraper rows for each test query."""
+    if per_niche < 1:
+        raise ValueError("Test results per niche must be greater than zero")
+    counts: dict[str, int] = {}
+    limited: list[dict[str, Any]] = []
+    for row in rows:
+        input_id = str(_first(row, "input_id", default="")).strip()
+        key = input_id if input_id.startswith(TEST_INPUT_ID_PREFIX) else "unclassified"
+        if counts.get(key, 0) >= per_niche:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        limited.append(dict(row))
+    return limited
+
+
+def run_gosom_scraper(
+    market: Market,
+    proxy_uri: str,
+    image: str | None = None,
+    test_mode: bool = False,
+    test_results_per_niche: int = DEFAULT_TEST_RESULTS_PER_NICHE,
+) -> list[dict[str, Any]]:
     """Run gosom/google-maps-scraper in Docker with grid coverage for one market."""
-    scraper_image = image or os.getenv("GOOGLE_MAPS_SCRAPER_IMAGE", "callmark/gosom-google-maps-scraper:text-only")
+    scraper_image = image or os.getenv("GOOGLE_MAPS_SCRAPER_IMAGE", "callmark/gosom-google-maps-scraper:cache-friendly")
     radius_m = float(os.getenv("SCRAPER_RADIUS", "5000"))
     grid_bbox = city_grid_bbox(market, radius_m)
     grid_cell_km = os.getenv("SCRAPER_GRID_CELL_KM", "2")
@@ -405,24 +438,42 @@ def run_gosom_scraper(market: Market, proxy_uri: str, image: str | None = None) 
         temp = Path(temp_name)
         query_file = temp / "queries.txt"
         proxy_file = temp / "proxies.txt"
-        query_file.write_text("\n".join(f"{niche} in {market.label}" for niche in NICHES) + "\n", encoding="utf-8")
+        queries = []
+        for index, niche in enumerate(NICHES):
+            query = f"{niche} in {market.label}"
+            if test_mode:
+                query = f"{query} #!# {TEST_INPUT_ID_PREFIX}{index}"
+            queries.append(query)
+        query_file.write_text("\n".join(queries) + "\n", encoding="utf-8")
         proxy_file.write_text(proxy_uri + "\n", encoding="utf-8")
+        depth = "1" if test_mode else os.getenv("SCRAPER_DEPTH", "5")
+        effective_concurrency = "1" if test_mode else concurrency
         command = [
             "docker", "run", "--rm", "--shm-size=2g", "-v", f"{temp}:/data",
             "-v", f"{proxy_file}:/run/secrets/gmaps-proxies:ro", scraper_image,
             "-input", "/data/queries.txt", "-results", "/data/results", "-json",
-            # gosom's grid mode is selected with -grid-bbox; -grid is not a
-            # valid flag in the fork and would make the nightly run fail.
-            "-grid-bbox", grid_bbox, "-grid-cell", grid_cell_km,
-            "-c", concurrency,
-            "-depth", os.getenv("SCRAPER_DEPTH", "5"),
+            "-c", effective_concurrency,
+            "-depth", depth,
             "-zoom", os.getenv("SCRAPER_ZOOM", "14"), "-radius", str(radius_m),
             "-lang", "en", "-proxies-file", "/run/secrets/gmaps-proxies",
         ]
+        if not test_mode:
+            # gosom's grid mode is selected with -grid-bbox; -grid is not a
+            # valid flag in the fork and would make the nightly run fail.
+            command.extend(["-grid-bbox", grid_bbox, "-grid-cell", grid_cell_km])
+        else:
+            command.extend(["-max-results-per-query", str(test_results_per_niche)])
         extra = os.getenv("SCRAPER_EXTRA_ARGS", "").strip()
-        if extra:
+        if extra and not test_mode:
             command.extend(extra.split())
-        LOG.info("Running gosom scraper for %s (%d niches)", market.label, len(NICHES))
+        elif extra:
+            LOG.warning("Ignoring SCRAPER_EXTRA_ARGS in test mode to preserve the low-bandwidth limits")
+        LOG.info(
+            "Running gosom scraper for %s (%d niches, test_mode=%s)",
+            market.label,
+            len(NICHES),
+            test_mode,
+        )
         completed = subprocess.run(command, capture_output=True, text=True, timeout=int(os.getenv("SCRAPER_TIMEOUT_SECONDS", "3300")))
         if completed.returncode != 0:
             detail = _safe_error(completed.stderr or completed.stdout, proxy_uri)
@@ -437,7 +488,8 @@ def run_gosom_scraper(market: Market, proxy_uri: str, image: str | None = None) 
         # Prefer JSON/NDJSON, then CSV, while allowing image versions to choose
         # their own filename or extension under the mounted results path.
         candidates.sort(key=lambda path: (path.suffix.casefold() not in {".json", ".ndjson"}, str(path)))
-        return load_scraper_results(candidates[0])
+        rows = load_scraper_results(candidates[0])
+        return _limit_test_rows(rows, test_results_per_niche) if test_mode else rows
 
 
 def _coerce_rating(value: Any) -> Any:
@@ -533,40 +585,14 @@ def to_callmark_contact(lead: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_firebase():
-    try:
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-    except ImportError as exc:
-        raise RuntimeError("Install requirements.txt before running the pipeline") from exc
-    raw = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
-    if not raw and os.getenv("FIREBASE_SERVICE_ACCOUNT_BASE64"):
-        raw = base64.b64decode(os.environ["FIREBASE_SERVICE_ACCOUNT_BASE64"]).decode("utf-8")
-    if not raw:
-        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT_JSON is required")
-    try:
-        service_account = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT_JSON must contain valid service-account JSON") from exc
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(credentials.Certificate(service_account), {
-            "projectId": os.getenv("FIREBASE_PROJECT_ID") or service_account.get("project_id"),
-        })
-    return firestore.client()
-
-
-def _user_id() -> str:
-    value = os.getenv("FIREBASE_USER_ID") or os.getenv("CALLMARK_USER_ID")
-    if not value:
-        raise RuntimeError("FIREBASE_USER_ID is required to select the Callmark contacts workspace")
-    return value.strip()
-
-
-def read_progress(db: Any) -> int:
-    snapshot = db.document("scrape_progress/current").get()
-    if not snapshot.exists:
+def read_progress(path: Path = PROGRESS_FILE) -> int:
+    """Read the next city index from the repository progress file."""
+    if not path.exists():
         return 0
-    value = (snapshot.to_dict() or {}).get("index", 0)
+    try:
+        value = (json.loads(path.read_text(encoding="utf-8")) or {}).get("index", 0)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return 0
     try:
         index = int(value)
     except (TypeError, ValueError):
@@ -574,38 +600,23 @@ def read_progress(db: Any) -> int:
     return index if 0 <= index < len(CITIES) else 0
 
 
-def write_progress(db: Any, index: int, market: Market, stats: Mapping[str, Any]) -> None:
-    db.document("scrape_progress/current").set({
-        "index": index % len(CITIES),
-        "last_market": market.label,
-        "last_run_at": datetime.now(timezone.utc),
-        "last_run_stats": dict(stats),
-    }, merge=True)
+def write_progress(index: int, path: Path = PROGRESS_FILE) -> None:
+    """Persist only the next city index for the following scheduled run."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"index": index % len(CITIES)}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
-def read_existing_contacts(db: Any, user_id: str) -> list[dict[str, Any]]:
-    """Read the exact Callmark path and retain all existing fields for compatibility."""
-    docs = db.collection("users").document(user_id).collection("contacts").stream()
-    contacts: list[dict[str, Any]] = []
-    for doc in docs:
-        data = doc.to_dict() or {}
-        contacts.append({**data, "id": data.get("id", doc.id)})
-    return contacts
-
-
-def write_new_contacts(db: Any, user_id: str, contacts: Sequence[Mapping[str, Any]]) -> None:
-    if not contacts:
-        return
-    batch_size = 400
-    collection = db.collection("users").document(user_id).collection("contacts")
-    from firebase_admin import firestore
-    for start in range(0, len(contacts), batch_size):
-        batch = db.batch()
-        for contact in contacts[start:start + batch_size]:
-            payload = dict(contact)
-            payload["updatedAt"] = firestore.SERVER_TIMESTAMP
-            batch.set(collection.document(str(payload["id"])), payload, merge=True)
-        batch.commit()
+def write_csv(path: Path, contacts: Sequence[Mapping[str, Any]]) -> None:
+    """Write Callmark import fields and selected scraper metadata to CSV."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CALLMARK_CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for contact in contacts:
+            writer.writerow({field: contact.get(field, "") for field in CALLMARK_CSV_FIELDS})
 
 
 def process_results(rows: Iterable[Mapping[str, Any]], market: Market) -> list[dict[str, Any]]:
@@ -625,37 +636,93 @@ def process_results(rows: Iterable[Mapping[str, Any]], market: Market) -> list[d
     return leads
 
 
-def run_once() -> dict[str, Any]:
-    db = _load_firebase()
-    user_id = _user_id()
-    current_index = read_progress(db)
+def run_once(
+    progress_path: Path = PROGRESS_FILE,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    test_mode: bool = False,
+    test_results_per_niche: int = DEFAULT_TEST_RESULTS_PER_NICHE,
+) -> dict[str, Any]:
+    current_index = read_progress(progress_path)
     market = Market(*CITIES[current_index])
     proxy_uri = proxy_uri_from_env()
-    rows = run_gosom_scraper(market, proxy_uri)
+    rows = run_gosom_scraper(
+        market,
+        proxy_uri,
+        test_mode=test_mode,
+        test_results_per_niche=test_results_per_niche,
+    )
     leads = process_results(rows, market)
-    existing = read_existing_contacts(db, user_id)
-    existing_phones = {normalize_phone(item.get("phone")) for item in existing}
-    new_leads = [lead for lead in leads if lead["phone"] not in existing_phones]
-    contacts = [to_callmark_contact(lead) for lead in new_leads]
-    write_new_contacts(db, user_id, contacts)
+    contacts = [to_callmark_contact(lead) for lead in leads]
+    scraped_date = datetime.now(timezone.utc).date().isoformat()
+    safe_market = re.sub(r"[^a-z0-9]+", "-", market.label.casefold()).strip("-")
+    output_prefix = "callmark-test-leads" if test_mode else "callmark-leads"
+    output_path = output_dir / f"{output_prefix}-{safe_market}-{scraped_date}.csv"
+    write_csv(output_path, contacts)
     stats = {
         "scraped_rows": len(rows),
         "qualified_leads": len(leads),
-        "new_leads": len(new_leads),
-        "duplicates_skipped": len(leads) - len(new_leads),
+        "new_leads": len(leads),
+        "test_mode": test_mode,
+        "output_csv": str(output_path),
     }
-    write_progress(db, (current_index + 1) % len(CITIES), market, stats)
+    next_index = (current_index + 1) % len(CITIES)
+    write_progress(next_index, progress_path)
     LOG.info("Completed %s: %s", market.label, json.dumps(stats, sort_keys=True))
-    return {"market": market.label, **stats, "next_index": (current_index + 1) % len(CITIES)}
+    return {
+        "market": market.label,
+        "scraped_date": scraped_date,
+        "artifact_name": f"{output_prefix}-{safe_market}-{scraped_date}",
+        **stats,
+        "next_index": next_index,
+    }
 
 
-def main() -> int:
+def write_github_outputs(result: Mapping[str, Any]) -> None:
+    """Expose artifact metadata to later GitHub Actions steps when available."""
+    output_file = os.getenv("GITHUB_OUTPUT", "").strip()
+    if not output_file:
+        return
+    with Path(output_file).open("a", encoding="utf-8") as handle:
+        for key in ("artifact_name", "output_csv", "market", "scraped_date"):
+            handle.write(f"{key}={result[key]}\n")
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--test-mode",
+        action="store_true",
+        default=_env_flag("TEST_MODE"),
+        help="disable grid mode, use depth/concurrency 1, and keep a small sample per niche",
+    )
+    parser.add_argument(
+        "--test-results-per-niche",
+        type=int,
+        default=int(os.getenv("TEST_RESULTS_PER_NICHE", str(DEFAULT_TEST_RESULTS_PER_NICHE))),
+        help="maximum raw results retained per niche in test mode (default: 10)",
+    )
+    args = parser.parse_args(argv)
+    if args.test_results_per_niche < 1:
+        parser.error("--test-results-per-niche must be greater than zero")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+    args = _parse_args(argv)
     try:
-        result = run_once()
+        result = run_once(
+            test_mode=args.test_mode,
+            test_results_per_niche=args.test_results_per_niche,
+        )
     except Exception:
         LOG.exception("Lead scrape failed; progress was not advanced")
         return 1
+    write_github_outputs(result)
     print(json.dumps(result, sort_keys=True))
     return 0
 

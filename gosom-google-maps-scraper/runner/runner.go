@@ -51,6 +51,7 @@ type Config struct {
 	Concurrency              int
 	CacheDir                 string
 	MaxDepth                 int
+	MaxResultsPerQuery       int
 	InputFile                string
 	ResultsFile              string
 	JSON                     bool
@@ -112,6 +113,7 @@ func ParseConfig() *Config {
 	flag.IntVar(&cfg.Concurrency, "c", min(runtime.NumCPU()/2, 1), "sets the concurrency [default: half of CPU cores]")
 	flag.StringVar(&cfg.CacheDir, "cache", "cache", "sets the cache directory [no effect at the moment]")
 	flag.IntVar(&cfg.MaxDepth, "depth", 10, "maximum scroll depth in search results [default: 10]")
+	flag.IntVar(&cfg.MaxResultsPerQuery, "max-results-per-query", 0, "maximum place pages visited per search query; 0 means unlimited")
 	flag.StringVar(&cfg.ResultsFile, "results", "stdout", "path to the results file [default: stdout]")
 	flag.StringVar(&cfg.InputFile, "input", "", "path to the input file with queries (one per line) [default: empty]")
 	flag.StringVar(&cfg.LangCode, "lang", "en", "language code for Google (e.g., 'de' for German) [default: en]")
@@ -203,6 +205,10 @@ func ParseConfig() *Config {
 
 	if cfg.MaxDepth < 1 {
 		panic("MaxDepth must be greater than 0")
+	}
+
+	if cfg.MaxResultsPerQuery < 0 {
+		panic("MaxResultsPerQuery cannot be negative")
 	}
 
 	if cfg.Zoom < 0 || cfg.Zoom > 21 {

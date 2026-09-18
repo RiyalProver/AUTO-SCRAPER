@@ -2,7 +2,7 @@
 
 ARG GO_VERSION=1.27.1
 
-# Callmark fork of gosom/google-maps-scraper with text-only Playwright routing.
+# Callmark fork with native Chromium image blocking and HTTP caching preserved.
 # The local third_party/scrapemate replace is compiled into this image.
 
 # Build stage for Playwright dependencies

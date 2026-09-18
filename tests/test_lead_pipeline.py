@@ -1,4 +1,8 @@
+import csv
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from lead_pipeline import (
@@ -8,7 +12,9 @@ from lead_pipeline import (
     MISSING_META,
     NO_WEBSITE,
     OPPORTUNITY_SOLID,
+    _parse_args,
     CALLMARK_CONTACT_FIELDS,
+    CALLMARK_CSV_FIELDS,
     CITIES,
     Market,
     audit_website,
@@ -19,8 +25,11 @@ from lead_pipeline import (
     normalize_scraped_lead,
     process_results,
     proxy_uri_from_env,
+    read_progress,
     run_gosom_scraper,
     to_callmark_contact,
+    write_csv,
+    write_progress,
 )
 
 
@@ -57,6 +66,47 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertIn("-grid-cell", command)
         self.assertIn("/run/secrets/gmaps-proxies", command)
         self.assertNotIn("-grid", command)
+
+    def test_scraper_test_mode_disables_grid_and_caps_each_niche(self):
+        completed = Mock(returncode=0, stdout="", stderr="")
+        rows = [
+            {"input_id": f"test-niche-{niche_index}", "title": f"Lead {niche_index}-{result_index}"}
+            for niche_index in range(2)
+            for result_index in range(12)
+        ]
+
+        def fake_run(command, **_kwargs):
+            mount = next(value for index, value in enumerate(command) if command[index - 1] == "-v")
+            output_dir = mount.rsplit(":", 1)[0]
+            with open(f"{output_dir}/results.json", "w", encoding="utf-8") as handle:
+                handle.write("[]")
+            return completed
+
+        with patch("lead_pipeline.subprocess.run", side_effect=fake_run) as run_mock:
+            with patch("lead_pipeline.load_scraper_results", return_value=rows):
+                result = run_gosom_scraper(
+                    Market("Fort Wayne", "IN"),
+                    "http://proxy.test:8000",
+                    test_mode=True,
+                    test_results_per_niche=10,
+                )
+
+        command = run_mock.call_args.args[0]
+        self.assertNotIn("-grid-bbox", command)
+        self.assertNotIn("-grid-cell", command)
+        self.assertEqual(command[command.index("-depth") + 1], "1")
+        self.assertEqual(command[command.index("-c") + 1], "1")
+        self.assertEqual(command[command.index("-max-results-per-query") + 1], "10")
+        self.assertEqual(len(result), 20)
+        self.assertEqual(
+            {input_id: sum(row["input_id"] == input_id for row in result) for input_id in {row["input_id"] for row in result}},
+            {"test-niche-0": 10, "test-niche-1": 10},
+        )
+
+    def test_test_mode_can_be_enabled_by_flag_or_environment(self):
+        self.assertTrue(_parse_args(["--test-mode"]).test_mode)
+        with patch.dict(os.environ, {"TEST_MODE": "true"}):
+            self.assertTrue(_parse_args([]).test_mode)
 
     def test_chain_filter(self):
         self.assertTrue(is_chain_restaurant("McDonald's #22", "restaurant"))
@@ -137,8 +187,16 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertEqual(lead["email"], "hello@local.example")
 
     def test_proxy_env(self):
-        self.assertEqual(proxy_uri_from_env({"PROXY_URL": "http://rotating.example:8000"}), "http://rotating.example:8000")
-        self.assertEqual(proxy_uri_from_env({"PROXY_HOST": "h", "PROXY_PORT": "1", "PROXY_USERNAME": "u", "PROXY_PASSWORD": "p"}), "http://u:p@h:1")
+        self.assertEqual(
+            proxy_uri_from_env({
+                "PROXY_HOST": "h",
+                "PROXY_PORT": "1",
+                "PROXY_USERNAME": "u",
+                "PROXY_PASSWORD": "p",
+                "PROXY_SCHEME": "http",
+            }),
+            "http://u:p@h:1",
+        )
 
     def test_callmark_display_field_mapping(self):
         lead = {
@@ -170,6 +228,48 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertEqual(contact["status"], "New")
         self.assertEqual(contact["due"], "Today")
         self.assertEqual(contact["website_opportunity"], NO_WEBSITE)
+
+    def test_csv_output_has_exact_requested_columns(self):
+        contact = to_callmark_contact({
+            "company_name": "Local Electric",
+            "category": "Electrician",
+            "market": "Fort Wayne, IN",
+            "city": "Fort Wayne",
+            "state": "IN",
+            "phone": "2605550100",
+            "email": "hello@local.test",
+            "source": "gosom/google-maps-scraper",
+            "website_status": "NO_WEBSITE",
+            "website_opportunity": NO_WEBSITE,
+            "address": "100 Main St",
+            "rating": 4.7,
+            "verified_date": "2026-09-16",
+        })
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "leads.csv"
+            write_csv(path, [contact])
+            with path.open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+        self.assertEqual(tuple(reader.fieldnames or ()), CALLMARK_CSV_FIELDS)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["phone"], "2605550100")
+        self.assertEqual(rows[0]["website_opportunity"], NO_WEBSITE)
+        self.assertEqual(
+            CALLMARK_CSV_FIELDS,
+            CALLMARK_CONTACT_FIELDS + (
+                "website_status", "website_opportunity", "address", "rating", "verified_date",
+            ),
+        )
+
+    def test_progress_file_advances_and_wraps_after_city_fifty(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "scrape_progress.json"
+            self.assertEqual(read_progress(path), 0)
+            write_progress(1, path)
+            self.assertEqual(read_progress(path), 1)
+            write_progress(len(CITIES), path)
+            self.assertEqual(read_progress(path), 0)
 
 
 if __name__ == "__main__":

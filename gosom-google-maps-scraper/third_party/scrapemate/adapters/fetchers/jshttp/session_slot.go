@@ -184,10 +184,6 @@ func (r *playwrightRuntime) recreateContext() error {
 	if err != nil {
 		return err
 	}
-	if err := installTextOnlyRouting(ctx); err != nil {
-		_ = ctx.Close()
-		return err
-	}
 
 	r.browser.ctx = ctx
 	r.browser.page0Usage = 0

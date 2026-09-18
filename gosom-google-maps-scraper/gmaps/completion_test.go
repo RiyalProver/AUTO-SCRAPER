@@ -48,6 +48,39 @@ func TestGmapJobProcessNotifiesSeedDiscovery(t *testing.T) {
 	require.Equal(t, 2, tracker.seedPlacesFound)
 }
 
+func TestGmapJobProcessLimitsPlaceJobs(t *testing.T) {
+	t.Parallel()
+
+	tracker := &recordingCompletionTracker{}
+	job := gmaps.NewGmapJob(
+		"input-1",
+		"en",
+		"coffee",
+		1,
+		false,
+		"",
+		0,
+		gmaps.WithMaxResults(2),
+		gmaps.WithGmapCompletionTracker(tracker),
+	)
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(`
+		<html><body>
+			<div role="feed">
+				<div jsaction="x"><a href="https://www.google.com/maps/place/a"></a></div>
+				<div jsaction="x"><a href="https://www.google.com/maps/place/b"></a></div>
+				<div jsaction="x"><a href="https://www.google.com/maps/place/c"></a></div>
+			</div>
+		</body></html>
+	`))
+	require.NoError(t, err)
+
+	_, next, err := job.Process(context.Background(), &scrapemate.Response{Document: doc})
+
+	require.NoError(t, err)
+	require.Len(t, next, 2)
+	require.Equal(t, 2, tracker.seedPlacesFound)
+}
+
 func TestPlaceJobProcessDoesNotCompleteInputOnTerminalError(t *testing.T) {
 	t.Parallel()
 

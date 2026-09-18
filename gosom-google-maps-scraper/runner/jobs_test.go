@@ -146,6 +146,37 @@ func TestCreateSeedJobsAddsCompletionTracker(t *testing.T) {
 	}
 }
 
+func TestCreateSeedJobsAddsMaxResultsPerQuery(t *testing.T) {
+	t.Parallel()
+
+	jobs, err := runner.CreateSeedJobs(
+		false,
+		"en",
+		strings.NewReader("coffee\n"),
+		10,
+		false,
+		"",
+		15,
+		10000,
+		nil,
+		nil,
+		false,
+		runner.WithMaxResultsPerQuery(10),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job, ok := jobs[0].(*gmaps.GmapJob)
+	if !ok {
+		t.Fatalf("expected *gmaps.GmapJob, got %T", jobs[0])
+	}
+
+	if job.MaxResults != 10 {
+		t.Fatalf("expected max results 10, got %d", job.MaxResults)
+	}
+}
+
 type recordingSeedTracker struct{}
 
 func (t *recordingSeedTracker) SeedDiscovered(string, int) error {

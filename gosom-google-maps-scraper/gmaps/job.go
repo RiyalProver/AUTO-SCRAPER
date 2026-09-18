@@ -27,6 +27,7 @@ type GmapJob struct {
 	scrapemate.Job
 
 	MaxDepth     int
+	MaxResults   int
 	LangCode     string
 	ExtractEmail bool
 
@@ -119,6 +120,13 @@ func WithGmapCompletionTracker(tracker CompletionTracker) GmapJobOptions {
 	}
 }
 
+// WithMaxResults limits how many place pages a search result may enqueue.
+func WithMaxResults(limit int) GmapJobOptions {
+	return func(j *GmapJob) {
+		j.MaxResults = limit
+	}
+}
+
 func (j *GmapJob) UseInResults() bool {
 	return false
 }
@@ -169,6 +177,10 @@ func (j *GmapJob) Process(ctx context.Context, resp *scrapemate.Response) (any, 
 		next = append(next, placeJob)
 	} else {
 		doc.Find(`div[role=feed] div[jsaction]>a`).Each(func(_ int, s *goquery.Selection) {
+			if j.MaxResults > 0 && len(next) >= j.MaxResults {
+				return
+			}
+
 			if href := s.AttrOr("href", ""); href != "" {
 				jopts := []PlaceJobOptions{}
 				if j.ExitMonitor != nil {

@@ -289,60 +289,43 @@ func (o *browser) Close() {
 	_ = o.browser.Close()
 }
 
-// shouldBlockResourceType identifies browser resources that cannot contribute
-// to the text fields extracted from Google Maps. Scripts, documents, XHR/fetch,
-// and other text-bearing requests continue normally.
-func shouldBlockResourceType(resourceType string) bool {
-	switch resourceType {
-	case "image", "font", "media", "stylesheet":
-		return true
-	default:
-		return false
+func browserLaunchArgs(disableImages bool) []string {
+	args := []string{
+		`--start-maximized`,
+		`--no-default-browser-check`,
+		`--disable-dev-shm-usage`,
+		`--no-sandbox`,
+		`--disable-setuid-sandbox`,
+		`--no-zygote`,
+		`--disable-gpu`,
+		`--mute-audio`,
+		`--disable-extensions`,
+		`--single-process`,
+		`--disable-breakpad`,
+		`--disable-features=TranslateUI,BlinkGenPropertyTrees`,
+		`--disable-ipc-flooding-protection`,
+		`--enable-features=NetworkService,NetworkServiceInProcess`,
+		"--enable-features=NetworkService",
+		`--disable-default-apps`,
+		`--disable-notifications`,
+		`--disable-webgl`,
+		`--disable-blink-features=AutomationControlled`,
+		"--ignore-certificate-errors",
+		"--ignore-certificate-errors-spki-list",
+		"--disable-web-security",
 	}
-}
 
-// installTextOnlyRouting applies at the browser-context level so it covers the
-// initial page and every popup/new page created by the scraper.
-func installTextOnlyRouting(ctx playwright.BrowserContext) error {
-	return ctx.Route("**/*", func(route playwright.Route) {
-		if shouldBlockResourceType(route.Request().ResourceType()) {
-			_ = route.Abort()
-			return
-		}
-		_ = route.Continue()
-	})
+	if disableImages {
+		args = append(args, `--blink-settings=imagesEnabled=false`)
+	}
+
+	return args
 }
 
 func newBrowser(pw *playwright.Playwright, headless, disableImages bool, proxyPool *ProxyPool, ua string) (*browser, error) {
 	opts := playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(headless),
-		Args: []string{
-			`--start-maximized`,
-			`--no-default-browser-check`,
-			`--disable-dev-shm-usage`,
-			`--no-sandbox`,
-			`--disable-setuid-sandbox`,
-			`--no-zygote`,
-			`--disable-gpu`,
-			`--mute-audio`,
-			`--disable-extensions`,
-			`--single-process`,
-			`--disable-breakpad`,
-			`--disable-features=TranslateUI,BlinkGenPropertyTrees`,
-			`--disable-ipc-flooding-protection`,
-			`--enable-features=NetworkService,NetworkServiceInProcess`,
-			"--enable-features=NetworkService",
-			`--disable-default-apps`,
-			`--disable-notifications`,
-			`--disable-webgl`,
-			`--disable-blink-features=AutomationControlled`,
-			"--ignore-certificate-errors",
-			"--ignore-certificate-errors-spki-list",
-			"--disable-web-security",
-		},
-	}
-	if disableImages {
-		opts.Args = append(opts.Args, `--blink-settings=imagesEnabled=false`)
+		Args:     browserLaunchArgs(disableImages),
 	}
 
 	br, err := pw.Chromium.Launch(opts)
@@ -381,11 +364,6 @@ func newBrowser(pw *playwright.Playwright, headless, disableImages bool, proxyPo
 		}(),
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := installTextOnlyRouting(bctx); err != nil {
-		_ = bctx.Close()
-		_ = br.Close()
 		return nil, err
 	}
 

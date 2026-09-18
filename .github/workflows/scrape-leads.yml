@@ -4,9 +4,15 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: Run a small non-grid sample for inexpensive end-to-end testing
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: callmark-lead-scrape
@@ -17,20 +23,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-      FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
-      FIREBASE_USER_ID: ${{ secrets.FIREBASE_USER_ID }}
-      PROXY_URL: ${{ secrets.PROXY_URL }}
       PROXY_HOST: ${{ secrets.PROXY_HOST }}
       PROXY_PORT: ${{ secrets.PROXY_PORT }}
       PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
       PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
       PROXY_SCHEME: ${{ secrets.PROXY_SCHEME }}
-      GOOGLE_MAPS_SCRAPER_IMAGE: callmark/gosom-google-maps-scraper:text-only
+      GOOGLE_MAPS_SCRAPER_IMAGE: callmark/gosom-google-maps-scraper:cache-friendly
       SCRAPER_TIMEOUT_SECONDS: "7200"
       SCRAPER_DEPTH: "5"
       SCRAPER_GRID_CELL_KM: "2"
       SCRAPER_CONCURRENCY: "2"
+      TEST_MODE: ${{ inputs.test_mode || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -43,5 +46,27 @@ jobs:
         run: docker build --tag "$GOOGLE_MAPS_SCRAPER_IMAGE" ./gosom-google-maps-scraper
       - name: Install pipeline dependencies
         run: python -m pip install -r requirements.txt
-      - name: Scrape one market and write new Callmark contacts
+      - name: Run pipeline tests
+        run: python -m unittest discover -s tests -v
+      - name: Scrape one market and write CSV
+        id: scrape
         run: python lead_pipeline.py
+      - name: Upload CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.scrape.outputs.artifact_name || format('callmark-leads-run-{0}', github.run_id) }}
+          path: output/*.csv
+          if-no-files-found: warn
+      - name: Commit updated scrape progress
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scrape_progress.json
+          if ! git diff --cached --quiet -- scrape_progress.json; then
+            git commit -m "Advance lead scrape progress"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "scrape_progress.json unchanged"
+          fi
